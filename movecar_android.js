@@ -1,0 +1,1137 @@
+addEventListener("fetch", (event) => {
+  event.respondWith(handleRequest(event.request));
+});
+
+const CONFIG = { 
+  KV_TTL: 3600,
+  NOTIFY_COOLDOWN: 300, // 5分钟冷却
+};
+
+// ★ 新增：从 CAR_LIST 环境变量按车牌匹配配置
+function getCarConfig(plate) {
+  if (typeof CAR_LIST === 'undefined') return null;
+  const target = plate.trim().toUpperCase();
+  const lines = CAR_LIST.split('\n');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const parts = line.split(',').map(s => s.trim());
+    if (parts.length < 2) continue;
+    if (parts[0].toUpperCase() === target) {
+      return { license: parts[0], webhook: parts[1], phone: parts[2] || '' };
+    }
+  }
+  return null;
+}
+
+async function handleRequest(request) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // ★ 解析车牌参数
+  const plate = url.searchParams.get("plate");
+  let carConfig = null;
+  if (plate) {
+    carConfig = getCarConfig(plate);
+    if (!carConfig) {
+      return new Response("该车牌未登记", { status: 400, headers: { "Content-Type": "text/plain;charset=UTF-8" } });
+    }
+  }
+
+  if (path === "/api/notify" && request.method === "POST") {
+    return handleNotify(request, url, plate, carConfig);
+  }
+
+  if (path === "/api/get-location") {
+    return handleGetLocation(plate);
+  }
+
+  if (path === "/api/update-location" && request.method === "POST") {
+    return handleUpdateLocation(request, plate);
+  }
+
+  if (path === "/api/owner-confirm" && request.method === "POST") {
+    return handleOwnerConfirmAction(request, plate, carConfig);
+  }
+
+  if (path === "/api/check-status") {
+    return handleCheckStatus(plate);
+  }
+
+  if (path === "/owner-confirm") {
+    return renderOwnerPage(plate, carConfig);
+  }
+
+  if (plate && carConfig) {
+    return renderMainPage(url.origin, plate, carConfig);
+  }
+  return renderMainPage(url.origin);
+}
+
+// ── 企业微信群机器人推送 ─────────────────────────────────────────────────
+
+async function sendWecomBotMessage(webhookUrl, content) {
+  // 兼容：没传 webhookUrl 时回退到全局变量（单车模式）
+  if (!webhookUrl) webhookUrl = WECOM_WEBHOOK;
+  
+  const body = {
+    msgtype: "markdown",
+    markdown: {
+      content: content
+    }
+  };
+
+  const res = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  
+  const data = await res.json();
+  
+  if (data.errcode !== 0) {
+    throw new Error(`推送失败 [${data.errcode}]: ${data.errmsg}`);
+  }
+  return data;
+}
+
+// ── 坐标转换：WGS-84 → GCJ-02 ──────────────────────────────────────────
+
+function wgs84ToGcj02(lat, lng) {
+  const a = 6378245.0;
+  const ee = 0.00669342162296594323;
+  if (outOfChina(lat, lng)) return { lat, lng };
+  let dLat = transformLat(lng - 105.0, lat - 35.0);
+  let dLng = transformLng(lng - 105.0, lat - 35.0);
+  const radLat = (lat / 180.0) * Math.PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - ee * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI);
+  dLng = (dLng * 180.0) / ((a / sqrtMagic) * Math.cos(radLat) * Math.PI);
+  return { lat: lat + dLat, lng: lng + dLng };
+}
+
+function outOfChina(lat, lng) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+}
+
+function transformLat(x, y) {
+  let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin((y / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((160.0 * Math.sin((y / 12.0) * Math.PI) + 320 * Math.sin((y * Math.PI) / 30.0)) * 2.0) / 3.0;
+  return ret;
+}
+
+function transformLng(x, y) {
+  let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0;
+  return ret;
+}
+
+function generateMapUrls(lat, lng) {
+  const gcj = wgs84ToGcj02(lat, lng);
+  return {
+    amapUrl: `https://uri.amap.com/marker?position=${gcj.lng},${gcj.lat}&name=位置`,
+    appleUrl: `https://maps.apple.com/?ll=${gcj.lat},${gcj.lng}&q=位置`,
+  };
+}
+
+// ── 核心：处理挪车通知请求 ──────────────────────────────────────────────
+
+async function handleNotify(request, url, plate, carConfig) {
+  try {
+    // ★ 确定本轮使用的 key 后缀和推送配置
+    const keySuffix = plate ? `:${plate}` : '';
+    const webhook   = carConfig ? carConfig.webhook : null;  // null → 回退到全局 WECOM_WEBHOOK
+
+    // 检查冷却期（按车牌隔离）
+    const lastNotify = await MOVE_CAR_STATUS.get(`last_notify_time${keySuffix}`);
+    if (lastNotify) {
+      const elapsed = (Date.now() - parseInt(lastNotify)) / 1000;
+      if (elapsed < CONFIG.NOTIFY_COOLDOWN) {
+        const retryAfter = Math.ceil(CONFIG.NOTIFY_COOLDOWN - elapsed);
+        return new Response(
+          JSON.stringify({ success: false, error: "5分钟内只能发送一次通知", retryAfter }),
+          { status: 429, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    const body = await request.json();
+    const message = body.message || "车旁有人等待";
+    const location = body.location || null;
+    const isRetry = body.isRetry || false;
+
+    const confirmUrl = url.origin + "/owner-confirm" + (plate ? `?plate=${plate}` : '');
+
+    let content = isRetry ? "## 🚗 再次提醒：挪车请求\n\n" : "## 🚗 挪车请求\n\n";
+    if (plate) content += `> 🚘 车牌：<font color="info">${plate}</font>\n\n`;
+    if (message) content += `> 💬 留言：<font color="info">${message}</font>\n\n`;
+    
+    if (location && location.lat && location.lng) {
+      content += "📍 已附带位置信息\n\n";
+      const urls = generateMapUrls(location.lat, location.lng);
+      await MOVE_CAR_STATUS.put(
+        `requester_location${keySuffix}`,
+        JSON.stringify({
+          lat: location.lat,
+          lng: location.lng,
+          ...urls,
+        }),
+        { expirationTtl: CONFIG.KV_TTL },
+      );
+    } else {
+      content += "⚠️ 未提供位置信息\n\n";
+    }
+    
+    content += `[👉 点击确认挪车](${confirmUrl})`;
+
+    await MOVE_CAR_STATUS.put(`notify_status${keySuffix}`, "waiting", {
+      expirationTtl: 600,
+    });
+
+    await sendWecomBotMessage(webhook, content);
+
+    // 记录发送时间（按车牌隔离）
+    await MOVE_CAR_STATUS.put(`last_notify_time${keySuffix}`, Date.now().toString(), {
+      expirationTtl: CONFIG.NOTIFY_COOLDOWN,
+    });
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ success: false, error: error.message }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
+// ── 获取请求者位置 ──────────────────────────────────────────────────────
+
+async function handleGetLocation(plate) {
+  const key = plate ? `requester_location:${plate}` : "requester_location";
+  const data = await MOVE_CAR_STATUS.get(key);
+  if (data) {
+    return new Response(data, {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return new Response(JSON.stringify({ error: "No location" }), {
+    status: 404,
+  });
+}
+
+// ── 更新请求者位置（成功页面内获取定位后补发） ──────────────────────────
+
+async function handleUpdateLocation(request, plate) {
+  try {
+    const keySuffix = plate ? `:${plate}` : '';
+    const body = await request.json();
+    const location = body.location;
+    
+    if (location && location.lat && location.lng) {
+      const urls = generateMapUrls(location.lat, location.lng);
+      await MOVE_CAR_STATUS.put(
+        `requester_location${keySuffix}`,
+        JSON.stringify({
+          lat: location.lat,
+          lng: location.lng,
+          ...urls,
+        }),
+        { expirationTtl: CONFIG.KV_TTL },
+      );
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    
+    return new Response(JSON.stringify({ success: false, error: "Invalid location" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
+// ── 车主确认处理 ──────────────────────────────────────────────────────
+
+async function handleOwnerConfirmAction(request, plate, carConfig) {
+  const keySuffix = plate ? `:${plate}` : '';
+  try {
+    const body = await request.json();
+    const ownerLocation = body.location || null;
+
+    if (ownerLocation) {
+      const urls = generateMapUrls(ownerLocation.lat, ownerLocation.lng);
+      await MOVE_CAR_STATUS.put(
+        `owner_location${keySuffix}`,
+        JSON.stringify({
+          lat: ownerLocation.lat,
+          lng: ownerLocation.lng,
+          ...urls,
+          timestamp: Date.now(),
+        }),
+        { expirationTtl: CONFIG.KV_TTL },
+      );
+    }
+
+    await MOVE_CAR_STATUS.put(`notify_status${keySuffix}`, "confirmed", {
+      expirationTtl: 600,
+    });
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    await MOVE_CAR_STATUS.put(`notify_status${keySuffix}`, "confirmed", {
+      expirationTtl: 600,
+    });
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
+// ── 检查通知状态（轮询用） ──────────────────────────────────────────────
+
+async function handleCheckStatus(plate) {
+  const keySuffix = plate ? `:${plate}` : '';
+  const status = await MOVE_CAR_STATUS.get(`notify_status${keySuffix}`);
+  const ownerLocation = await MOVE_CAR_STATUS.get(`owner_location${keySuffix}`);
+  return new Response(
+    JSON.stringify({
+      status: status || "waiting",
+      ownerLocation: ownerLocation ? JSON.parse(ownerLocation) : null,
+    }),
+    { headers: { "Content-Type": "application/json" } },
+  );
+}
+
+// ── 请求者主页面 ──────────────────────────────────────────────────────────
+
+function renderMainPage(origin, plate, carConfig) {
+  // ★ 多车模式从 carConfig 取电话，单车模式回退到全局变量
+  const phone = plate ? (carConfig && carConfig.phone || '') : (typeof PHONE_NUMBER !== "undefined" ? PHONE_NUMBER : "");
+
+  const html = /*html*/ `
+  <!DOCTYPE html>
+  <html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0093E9">
+    <title>通知车主挪车</title>
+    <style>
+      :root { --sat: env(safe-area-inset-top, 0px); --sar: env(safe-area-inset-right, 0px); --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px); }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+      html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+      html, body { height: 100%; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(160deg, #0093E9 0%, #80D0C7 100%);
+        min-height: 100vh; min-height: -webkit-fill-available;
+        padding: clamp(16px, 4vw, 24px);
+        padding-top: calc(clamp(16px, 4vw, 24px) + var(--sat));
+        padding-bottom: calc(clamp(16px, 4vw, 24px) + var(--sab));
+        padding-left: calc(clamp(16px, 4vw, 24px) + var(--sal));
+        padding-right: calc(clamp(16px, 4vw, 24px) + var(--sar));
+        display: flex; justify-content: center; align-items: flex-start;
+      }
+      body::before {
+        content: ''; position: fixed; inset: 0;
+        background: url("data:image/svg+xml,%3Csvg width='52' height='26' viewBox='0 0 52 26' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.1'%3E%3Cpath d='M10 10c0-2.21-1.79-4-4-4-3.314 0-6-2.686-6-6h2c0 2.21 1.79 4 4 4 3.314 0 6 2.686 6 6 0 2.21 1.79 4 4 4 3.314 0 6 2.686 6 6 0 2.21 1.79 4 4 4v2c-3.314 0-6-2.686-6-6 0-2.21-1.79-4-4-4-3.314 0-6-2.686-6-6zm25.464-1.95l8.486 8.486-1.414 1.414-8.486-8.486 1.414-1.414z' /%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+        z-index: -1;
+      }
+      .container { width: 100%; max-width: 500px; display: flex; flex-direction: column; gap: clamp(12px, 3vw, 20px); }
+      .card { background: rgba(255, 255, 255, 0.95); border-radius: clamp(20px, 5vw, 28px); padding: clamp(18px, 4vw, 28px); box-shadow: 0 10px 40px rgba(0, 147, 233, 0.2); transition: transform 0.2s ease; }
+      @media (hover: hover) { .card:hover { transform: translateY(-2px); } }
+      .card:active { transform: scale(0.98); }
+      .header { text-align: center; padding: clamp(20px, 5vw, 32px) clamp(16px, 4vw, 28px); background: white; }
+      .icon-wrap { width: clamp(72px, 18vw, 100px); height: clamp(72px, 18vw, 100px); background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%); border-radius: clamp(22px, 5vw, 32px); display: flex; align-items: center; justify-content: center; margin: 0 auto clamp(14px, 3vw, 24px); box-shadow: 0 12px 32px rgba(0, 147, 233, 0.35); }
+      .icon-wrap span { font-size: clamp(36px, 9vw, 52px); line-height: 1; display: block; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+      .header h1 { font-size: clamp(22px, 5.5vw, 30px); font-weight: 700; color: #1a202c; margin-bottom: 6px; }
+      .header p { font-size: clamp(13px, 3.5vw, 16px); color: #718096; font-weight: 500; }
+      .input-card { padding: 0; overflow: hidden; }
+      .input-card .msg-input { width: 100%; min-height: clamp(90px, 20vw, 120px); border: none; padding: clamp(16px, 4vw, 24px); font-size: clamp(15px, 4vw, 18px); font-family: inherit; outline: none; color: #2d3748; background: transparent; line-height: 1.5; cursor: text; }
+      .input-card .msg-input:empty::before { content: attr(data-placeholder); color: #a0aec0; pointer-events: none; }
+      .tags { display: flex; justify-content: center; gap: clamp(8px, 3vw, 16px); padding: 0 clamp(12px, 3vw, 20px) clamp(14px, 3vw, 20px); flex-wrap: wrap; }
+      .tag { background: linear-gradient(135deg, #e0f7fa 0%, #b2ebf2 100%); color: #00796b; padding: clamp(8px, 2vw, 12px) clamp(12px, 3vw, 18px); border-radius: 20px; font-size: clamp(13px, 3.5vw, 15px); font-weight: 600; white-space: nowrap; cursor: pointer; transition: all 0.2s; border: 1px solid #80cbc4; min-height: 44px; display: flex; align-items: center; }
+      .tag:active { transform: scale(0.95); background: #80cbc4; }
+      .tag.active { background: linear-gradient(135deg, #b2dfdb 0%, #80cbc4 100%); border-color: #00897b; color: #00695c; }
+      .loc-card { display: flex; align-items: center; gap: clamp(10px, 3vw, 16px); padding: clamp(14px, 3.5vw, 22px) clamp(16px, 4vw, 24px); cursor: pointer; min-height: 64px; }
+      .loc-icon { width: clamp(44px, 11vw, 56px); height: clamp(44px, 11vw, 56px); border-radius: clamp(14px, 3.5vw, 18px); display: flex; align-items: center; justify-content: center; font-size: clamp(22px, 5.5vw, 28px); transition: all 0.3s; flex-shrink: 0; }
+      .loc-icon.idle { background: #f0f9ff; }
+      .loc-icon.loading { background: #fff3cd; }
+      .loc-icon.success { background: #d4edda; }
+      .loc-icon.error { background: #f8d7da; }
+      .loc-content { flex: 1; min-width: 0; }
+      .loc-title { font-size: clamp(15px, 4vw, 18px); font-weight: 600; color: #2d3748; }
+      .loc-status { font-size: clamp(12px, 3.2vw, 14px); color: #718096; margin-top: 3px; }
+      .loc-status.success { color: #28a745; }
+      .loc-status.error { color: #dc3545; }
+      .loc-status.hint { color: #0093E9; font-weight: 600; }
+      .btn-main { background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%); color: white; border: none; padding: clamp(16px, 4vw, 22px); border-radius: clamp(16px, 4vw, 22px); font-size: clamp(16px, 4.2vw, 20px); font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 10px 30px rgba(0, 147, 233, 0.35), 0 0 0 4px rgba(255, 255, 255, 0.4), 0 0 0 8px rgba(255, 255, 255, 0.15); transition: all 0.2s; min-height: 56px; animation: btn-pulse 2.4s ease-in-out infinite; margin: 0 8px; }
+      .btn-main:active { transform: scale(0.98); animation: none; }
+      .btn-main:disabled { background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); box-shadow: none; cursor: not-allowed; animation: none; }
+      @keyframes btn-pulse { 0%, 100% { box-shadow: 0 10px 30px rgba(0,147,233,0.35), 0 0 0 4px rgba(255,255,255,0.4), 0 0 0 8px rgba(255,255,255,0.15); } 50% { box-shadow: 0 10px 30px rgba(0,147,233,0.45), 0 0 0 6px rgba(255,255,255,0.5), 0 0 0 12px rgba(255,255,255,0.12); } }
+      .toast { position: fixed; top: calc(20px + var(--sat)); left: 50%; transform: translateX(-50%) translateY(-100px); background: white; padding: clamp(10px, 2.5vw, 14px) clamp(18px, 4.5vw, 28px); border-radius: 16px; font-size: clamp(13px, 3.2vw, 15px); font-weight: 600; color: #2d3748; box-shadow: 0 10px 40px rgba(0,0,0,0.15); opacity: 0; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); z-index: 100; max-width: calc(100vw - 32px); white-space: nowrap; text-align: center; }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      .toast.wrap { white-space: normal; text-align: center; line-height: 1.4; }
+      .pending-banner { background: rgba(255,255,255,0.95); border-radius: clamp(16px, 4vw, 20px); padding: clamp(14px, 3.5vw, 18px) clamp(16px, 4vw, 22px); display: none; align-items: center; gap: 12px; box-shadow: 0 8px 24px rgba(0,147,233,0.18); border: 1.5px solid rgba(0,147,233,0.25); cursor: pointer; transition: transform 0.15s; -webkit-tap-highlight-color: transparent; margin: 0 8px; }
+      .pending-banner:active { transform: scale(0.98); }
+      .pending-banner.show { display: flex; }
+      .pending-banner-icon { font-size: clamp(22px, 5.5vw, 28px); flex-shrink: 0; }
+      .pending-banner-text { flex: 1; font-size: clamp(14px, 3.5vw, 16px); font-weight: 600; color: #2d3748; }
+      .pending-banner-arrow { font-size: clamp(14px, 3.5vw, 16px); color: #0093E9; font-weight: 700; flex-shrink: 0; }
+      #successView { display: none; }
+      .success-card { text-align: center; background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); border: 2px solid #28a745; }
+      .success-icon { font-size: clamp(56px, 14vw, 80px); margin-bottom: clamp(12px, 3vw, 20px); display: block; }
+      .success-card h2 { color: #155724; margin-bottom: 8px; font-size: clamp(20px, 5vw, 28px); }
+      .success-card p { color: #1e7e34; font-size: clamp(14px, 3.5vw, 16px); }
+      .owner-card { background: white; border: 2px solid #80D0C7; text-align: center; }
+      .owner-card.hidden { display: none; }
+      .owner-card h3 { color: #0093E9; margin-bottom: 8px; font-size: clamp(18px, 4.5vw, 22px); }
+      .owner-card p { color: #718096; margin-bottom: 16px; font-size: clamp(14px, 3.5vw, 16px); }
+      .owner-card .map-links { display: flex; gap: clamp(8px, 2vw, 14px); flex-wrap: wrap; }
+      .owner-card .map-btn { flex: 1; min-width: 120px; padding: clamp(12px, 3vw, 16px); border-radius: clamp(12px, 3vw, 16px); text-decoration: none; font-weight: 600; font-size: clamp(13px, 3.5vw, 15px); text-align: center; min-height: 48px; display: flex; align-items: center; justify-content: center; }
+      .map-btn.amap { background: #1890ff; color: white; }
+      .map-btn.apple { background: #1d1d1f; color: white; }
+      .action-card { display: flex; flex-direction: column; gap: clamp(10px, 2.5vw, 14px); }
+      .action-hint { text-align: center; font-size: clamp(13px, 3.5vw, 15px); color: #718096; margin-bottom: 4px; }
+      .btn-retry, .btn-phone, .btn-share-loc { color: white; border: none; padding: clamp(14px, 3.5vw, 18px); border-radius: clamp(14px, 3.5vw, 18px); font-size: clamp(15px, 4vw, 17px); font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s; min-height: 52px; text-decoration: none; }
+      .btn-retry { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); box-shadow: 0 8px 24px rgba(245, 158, 11, 0.3); }
+      .btn-retry:active { transform: scale(0.98); }
+      .btn-retry:disabled { background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%); box-shadow: none; cursor: not-allowed; }
+      .btn-share-loc { background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%); box-shadow: 0 8px 24px rgba(0, 147, 233, 0.3); display: none; }
+      .btn-share-loc.show { display: flex; }
+      .btn-share-loc:active { transform: scale(0.98); }
+      .btn-share-loc:disabled { background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%); box-shadow: none; cursor: not-allowed; }
+      .btn-phone { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); box-shadow: 0 8px 24px rgba(239, 68, 68, 0.3); display: none; }
+      .btn-phone.show { display: flex; }
+      .btn-phone:active { transform: scale(0.98); }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+      .loading-text { animation: pulse 1.5s ease-in-out infinite; }
+      .modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; opacity: 0; visibility: hidden; transition: all 0.3s; }
+      .modal-overlay.show { opacity: 1; visibility: visible; }
+      .modal-box { background: white; border-radius: 20px; padding: clamp(24px, 6vw, 32px); max-width: 340px; width: 100%; text-align: center; transform: scale(0.9); transition: transform 0.3s; }
+      .modal-overlay.show .modal-box { transform: scale(1); }
+      .modal-icon { font-size: 48px; margin-bottom: 16px; }
+      .modal-title { font-size: 18px; font-weight: 700; color: #1a202c; margin-bottom: 8px; }
+      .modal-desc { font-size: 14px; color: #718096; margin-bottom: 24px; line-height: 1.5; }
+      .modal-buttons { display: flex; gap: 12px; }
+      .modal-btn { flex: 1; padding: 14px 16px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
+      .modal-btn:active { transform: scale(0.96); }
+      .modal-btn-primary { background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%); color: white; }
+      .modal-btn-secondary { background: #f1f5f9; color: #64748b; }
+      @media (min-width: 768px) { body { align-items: center; } .container { max-width: 480px; } }
+      @media (min-width: 1024px) { .container { max-width: 520px; } .card { padding: 32px; } }
+      @media (min-width: 600px) and (max-width: 900px) { .container { max-width: 460px; } }
+      @media (orientation: landscape) and (max-height: 500px) { body { align-items: flex-start; padding-top: calc(12px + var(--sat)); } .header { padding: 16px; } .icon-wrap { width: 60px; height: 60px; margin-bottom: 12px; } .icon-wrap span { font-size: 32px; line-height: 1; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; } .success-icon { font-size: 48px; margin-bottom: 10px; } }
+      @media (max-width: 350px) { .container { gap: 10px; } .card { padding: 14px; border-radius: 18px; } .tags { gap: 6px; } .tag { padding: 8px 10px; font-size: 12px; } }
+    </style>
+  </head>
+  <body>
+    <div id="toast" class="toast"></div>
+
+    <div id="locationTipModal" class="modal-overlay">
+      <div class="modal-box">
+        <div class="modal-icon">📍</div>
+        <div class="modal-title">位置信息说明</div>
+        <div class="modal-desc">分享位置可让车主确认您在车旁<br>不分享将等待30秒后发送通知</div>
+        <div class="modal-buttons">
+          <button class="modal-btn modal-btn-secondary" onclick="closeModalAndDeny()">不分享</button>
+          <button class="modal-btn modal-btn-primary" onclick="closeModalAndRequest()">分享</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="container" id="mainView">
+      <div class="card header">
+        <div class="icon-wrap"><span>🚗</span></div>
+        <h1>通知车主挪车</h1>
+        <p>Notify Car Owner</p>
+      </div>
+
+      <div id="pendingBanner" class="pending-banner" onclick="showPendingSession()">
+        <span class="pending-banner-icon">🔔</span>
+        <span class="pending-banner-text">您有一条进行中的通知</span>
+        <span class="pending-banner-arrow">查看 →</span>
+      </div>
+
+      <div class="card input-card">
+        <div id="msgInput" class="msg-input" contenteditable="true" data-placeholder="输入留言给车主...（或点击下方按钮）"></div>
+
+        <div class="tags">
+          <div id="tag-block" class="tag" onclick="selectBase('您的车挡住我了,请尽快挪开!')">🚧 挪车通知</div>
+          <div id="tag-temp"  class="tag" onclick="selectBase('此地不准停车,请尽快挪开!')">⏱️ 违停提醒</div>
+        </div>
+      </div>
+
+      <div class="card loc-card" onclick="showLocationModal()">
+        <div id="locIcon" class="loc-icon idle">📍</div>
+        <div class="loc-content">
+          <div class="loc-title">我的位置</div>
+          <div id="locStatus" class="loc-status">点击获取位置</div>
+        </div>
+      </div>
+
+      <button id="notifyBtn" class="card btn-main" onclick="sendNotify()" disabled>
+        <span>🔔</span>
+        <span>一键通知车主</span>
+      </button>
+    </div>
+
+    <div class="container" id="successView">
+      <div class="card success-card">
+        <span class="success-icon">✅</span>
+        <h2>通知已发送！</h2>
+        <p id="waitingText" class="loading-text">正在等待车主回应...</p>
+      </div>
+
+      <div id="ownerFeedback" class="card owner-card hidden">
+        <span style="font-size:56px; display:block; margin-bottom:16px">🎉</span>
+        <h3>车主已收到通知</h3>
+        <p>正在赶来，点击查看车主位置</p>
+        <div id="ownerMapLinks" class="map-links" style="display:none">
+          <a id="ownerAmapLink" href="#" class="map-btn amap">🗺️ 高德地图</a>
+          <a id="ownerAppleLink" href="#" class="map-btn apple">🍎 Apple Maps</a>
+        </div>
+      </div>
+
+      <div class="card action-card">
+        <p id="actionHint" class="action-hint">车主没反应？试试其他方式</p>
+        <button id="shareLocBtn" class="btn-share-loc" onclick="shareLocationInSuccess()">
+          <span>📍</span>
+          <span>分享位置</span>
+        </button>
+        <button id="retryBtn" class="btn-retry" onclick="retryNotify()">
+          <span>🔔</span>
+          <span>再次通知</span>
+        </button>
+        <a id="phoneBtn" href="tel:${phone}" class="btn-phone">
+          <span>📞</span>
+          <span>直接拨号</span>
+        </a>
+      </div>
+    </div>
+
+    <script>
+      const PLATE = ${plate ? JSON.stringify(plate) : "''"};
+      let userLocation = null;
+      let checkTimer = null;
+      let locationShared = false;
+      let locationFailed = false;
+      let lastModalCloseTime = 0;
+      const MODAL_COOLDOWN = 3000;
+      let countdownActive = false;
+      let countdownReason = '';
+      let retryCooldownTimer = null;
+
+      function showModal(id) { document.getElementById(id).classList.add('show'); }
+      function hideModal(id) { document.getElementById(id).classList.remove('show'); }
+
+      function showLocationModal() {
+        // 已成功获取位置
+        if (locationShared && userLocation !== null) {
+          showToast('📍 已获取位置');
+          return;
+        }
+
+        // 3秒冷却期，静默不响应
+        const now = Date.now();
+        if (now - lastModalCloseTime < MODAL_COOLDOWN) {
+          return;
+        }
+
+        // 倒计时进行中 + 主动拒绝 → 不弹窗，toast 提示
+        if (countdownActive && countdownReason === 'denied') {
+          showToast('⏳ 已选择不分享位置，倒计时结束后方可发送', true);
+          return;
+        }
+
+        // 倒计时进行中 + 定位失败 → 弹窗允许重试
+        // 倒计时已结束 + 未获取位置 → 弹窗允许重新选择
+        // 首次点击 → 弹窗
+        showModal('locationTipModal');
+      }
+
+      function closeModalAndRequest() {
+        hideModal('locationTipModal');
+        requestLocation();
+      }
+
+      function closeModalAndDeny() {
+        hideModal('locationTipModal');
+        denyLocation();
+      }
+
+      function updatePhoneButtonVisibility() {
+        const phoneBtn = document.getElementById('phoneBtn');
+        if (locationShared && userLocation !== null) {
+          phoneBtn.classList.add('show');
+        } else {
+          phoneBtn.classList.remove('show');
+        }
+      }
+
+      function updateActionHint() {
+        const hint = document.getElementById('actionHint');
+        const shareLocBtn = document.getElementById('shareLocBtn');
+        if (locationShared && userLocation !== null) {
+          hint.innerText = '车主没反应？试试其他方式';
+          shareLocBtn.classList.remove('show');
+        } else {
+          hint.innerText = '车主没反应？分享定位可拨打电话';
+          shareLocBtn.classList.add('show');
+        }
+      }
+
+      function requestLocation() {
+        lastModalCloseTime = Date.now();
+        locationFailed = false;
+
+        const icon = document.getElementById('locIcon');
+        const txt  = document.getElementById('locStatus');
+        icon.className = 'loc-icon loading';
+        txt.className  = countdownActive ? 'loc-status error' : 'loc-status';
+        txt.innerText  = '正在获取定位...';
+
+        if ('geolocation' in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            pos => {
+              userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+              locationShared = true;
+              locationFailed = false;
+              icon.className = 'loc-icon success';
+              txt.className  = 'loc-status success';
+              txt.innerText  = '已获取位置 ✓';
+              document.getElementById('notifyBtn').disabled = false;
+              stopCountdown();
+              updatePhoneButtonVisibility();
+              checkPendingSession();
+            },
+            () => {
+              locationFailed = true;
+              locationShared = false;
+              icon.className = 'loc-icon error';
+              txt.className  = 'loc-status error';
+              txt.innerText  = countdownActive ? 
+                (countdownReason === 'failed' ? '定位失败，' : '已选择不分享位置，') + (window._countdownRemaining || 30) + '秒后可发送' :
+                '定位失败';
+              if (!countdownActive) {
+                startLocationCountdown('failed');
+              }
+              updatePhoneButtonVisibility();
+              checkPendingSession();
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+          );
+        } else {
+          locationFailed = true;
+          locationShared = false;
+          icon.className = 'loc-icon error';
+          txt.className  = 'loc-status error';
+          if (!countdownActive) {
+            startLocationCountdown('failed');
+          } else {
+            txt.innerText = (countdownReason === 'failed' ? '定位失败，' : '已选择不分享位置，') + (window._countdownRemaining || 30) + '秒后可发送';
+          }
+          updatePhoneButtonVisibility();
+          checkPendingSession();
+        }
+      }
+
+      function denyLocation() {
+        lastModalCloseTime = Date.now();
+        locationFailed = false;
+        locationShared = false;
+
+        const icon = document.getElementById('locIcon');
+        const txt  = document.getElementById('locStatus');
+        icon.className = 'loc-icon error';
+        txt.className  = 'loc-status error';
+        startLocationCountdown('denied');
+        updatePhoneButtonVisibility();
+        checkPendingSession();
+      }
+
+      // 成功页面内分享位置
+      async function shareLocationInSuccess() {
+        const btn = document.getElementById('shareLocBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span>📍</span><span>获取中...</span>';
+
+        if ('geolocation' in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            async pos => {
+              userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+              locationShared = true;
+              btn.innerHTML = '<span>✅</span><span>已获取</span>';
+              btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+              
+              // 补发位置到服务端
+              try {
+                await fetch('/api/update-location' + (PLATE ? '?plate=' + PLATE : ''), {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ location: userLocation })
+                });
+              } catch(e) {}
+              
+              updatePhoneButtonVisibility();
+              updateActionHint();
+              showToast('📍 位置已分享，现在可以拨打电话了');
+            },
+            () => {
+              btn.disabled = false;
+              btn.innerHTML = '<span>📍</span><span>分享位置</span>';
+              showToast('❌ 定位失败，请重试');
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+          );
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = '<span>📍</span><span>分享位置</span>';
+          showToast('❌ 您的设备不支持定位');
+        }
+      }
+
+      function startLocationCountdown(reason) {
+        if (countdownActive) return;
+
+        countdownActive = true;
+        countdownReason = reason;
+
+        const btn = document.getElementById('notifyBtn');
+        const statusEl = document.getElementById('locStatus');
+        let remaining = 30;
+        window._countdownRemaining = remaining;
+
+        btn.disabled = true;
+
+        const prefix = reason === 'failed' ? '定位失败，' : '已选择不分享位置，';
+        const endText = reason === 'failed' ? '定位失败，点击重新获取' : '未分享位置，点击重新获取';
+        const suffix = '秒后可发送';
+
+        statusEl.innerText = prefix + remaining + suffix;
+        statusEl.className = 'loc-status error';
+
+        window._countdownTimer = setInterval(() => {
+          remaining--;
+          window._countdownRemaining = remaining;
+          statusEl.innerText = prefix + remaining + suffix;
+          if (remaining <= 0) {
+            stopCountdown();
+            statusEl.innerText = endText;
+            statusEl.className = 'loc-status hint';
+            btn.disabled = false;
+            showToast('✅ 现在可以发送通知了');
+          }
+        }, 1000);
+      }
+
+      function stopCountdown() {
+        if (window._countdownTimer) {
+          clearInterval(window._countdownTimer);
+          window._countdownTimer = null;
+        }
+        countdownActive = false;
+        countdownReason = '';
+        window._countdownRemaining = 0;
+      }
+
+      let selectedBaseText = '';
+
+      function selectBase(text) {
+        const el = document.getElementById('msgInput');
+        if (selectedBaseText === text) {
+          removeBaseText(el, text);
+          selectedBaseText = '';
+        } else {
+          if (selectedBaseText) {
+            replaceBaseText(el, selectedBaseText, text);
+          } else {
+            insertAtCursorNoFocus(el, text);
+          }
+          selectedBaseText = text;
+        }
+        updateTagActive();
+      }
+
+      function insertAtCursorNoFocus(el, text) {
+        // 不聚焦，不触发键盘
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+          const range = sel.getRangeAt(0);
+          range.deleteContents();
+          const node = document.createTextNode(text);
+          range.insertNode(node);
+          range.setStartAfter(node);
+          range.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        } else {
+          // 没有选区时，直接追加到末尾
+          el.appendChild(document.createTextNode(text));
+        }
+      }
+
+      function removeBaseText(el, text) {
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const n = walker.currentNode;
+          if (n.textContent.includes(text)) {
+            n.textContent = n.textContent.replace(text, '');
+            break;
+          }
+        }
+      }
+
+      function replaceBaseText(el, oldText, newText) {
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const n = walker.currentNode;
+          if (n.textContent.includes(oldText)) {
+            n.textContent = n.textContent.replace(oldText, newText);
+            return;
+          }
+        }
+        insertAtCursorNoFocus(el, newText);
+      }
+
+      function updateTagActive() {
+        document.getElementById('tag-block').classList.toggle('active', selectedBaseText === '您的车挡住我了,请尽快挪开!');
+        document.getElementById('tag-temp').classList.toggle('active',  selectedBaseText === '此地不准停车,请尽快挪开!');
+      }
+
+      async function sendNotify() {
+        const btn     = document.getElementById('notifyBtn');
+        const msg     = document.getElementById('msgInput').innerText.trim();
+
+        btn.disabled  = true;
+        btn.innerHTML = '<span>🚀</span><span>发送中...</span>';
+
+        try {
+          const res = await fetch('/api/notify' + (PLATE ? '?plate=' + PLATE : ''), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg, location: userLocation, isRetry: false })
+          });
+
+          const data = await res.json();
+
+          if (data.success) {
+            localStorage.setItem('pendingSession', JSON.stringify({
+              sentAt: Date.now(),
+              location: userLocation
+            }));
+            showToast('✅ 发送成功！');
+            document.getElementById('mainView').style.display    = 'none';
+            document.getElementById('successView').style.display = 'flex';
+            updateActionHint();
+            startPolling();
+          } else {
+            showToast('❌ 发送失败：' + (data.error || '未知错误'));
+            btn.disabled  = false;
+            btn.innerHTML = '<span>🔔</span><span>一键通知车主</span>';
+          }
+        } catch (e) {
+          showToast('❌ 网络错误，请重试');
+          btn.disabled  = false;
+          btn.innerHTML = '<span>🔔</span><span>一键通知车主</span>';
+        }
+      }
+
+      function startPolling() {
+        let count = 0;
+        checkTimer = setInterval(async () => {
+          count++;
+          if (count > 120) { clearInterval(checkTimer); return; }
+          try {
+            const res  = await fetch('/api/check-status' + (PLATE ? '?plate=' + PLATE : ''));
+            const data = await res.json();
+            if (data.status === 'confirmed') {
+              document.getElementById('waitingText').style.display = 'none';
+              const fb = document.getElementById('ownerFeedback');
+              fb.classList.remove('hidden');
+              if (data.ownerLocation && data.ownerLocation.amapUrl) {
+                document.getElementById('ownerMapLinks').style.display = 'flex';
+                document.getElementById('ownerAmapLink').href = data.ownerLocation.amapUrl;
+                document.getElementById('ownerAppleLink').href = data.ownerLocation.appleUrl;
+              }
+              clearInterval(checkTimer);
+              if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+            }
+          } catch(e) {}
+        }, 3000);
+      }
+
+      async function retryNotify() {
+        const btn = document.getElementById('retryBtn');
+        
+        // 检查是否在冷却期
+        if (btn.disabled) return;
+
+        btn.disabled  = true;
+        btn.innerHTML = '<span>🚀</span><span>发送中...</span>';
+
+        try {
+          const res = await fetch('/api/notify' + (PLATE ? '?plate=' + PLATE : ''), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: '再次通知：请尽快挪车', location: userLocation, isRetry: true })
+          });
+
+          const data = await res.json();
+
+          if (data.success) {
+            showToast('✅ 再次通知已发送！');
+            document.getElementById('waitingText').innerText = '已再次通知，等待车主回应...';
+            btn.innerHTML = '<span>✅</span><span>已发送</span>';
+            btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+            
+            // 5分钟后恢复
+            if (retryCooldownTimer) clearTimeout(retryCooldownTimer);
+            retryCooldownTimer = setTimeout(() => {
+              btn.disabled = false;
+              btn.innerHTML = '<span>🔔</span><span>再次通知</span>';
+              btn.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
+            }, 300000);
+          } else {
+            const retryAfter = data.retryAfter || 300;
+            showToast('⏳ ' + data.error);
+            btn.innerHTML = '<span>⏳</span><span>5分钟内只能发送一次</span>';
+            
+            // 到时自动恢复
+            if (retryCooldownTimer) clearTimeout(retryCooldownTimer);
+            retryCooldownTimer = setTimeout(() => {
+              btn.disabled = false;
+              btn.innerHTML = '<span>🔔</span><span>再次通知</span>';
+              btn.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
+            }, retryAfter * 1000);
+          }
+        } catch (e) {
+          showToast('❌ 网络错误，请重试');
+          btn.disabled  = false;
+          btn.innerHTML = '<span>🔔</span><span>再次通知</span>';
+        }
+      }
+
+      function checkPendingSession() {
+        let session;
+        try { session = JSON.parse(localStorage.getItem('pendingSession')); } catch(e) {}
+        if (!session) return;
+
+        const elapsed = Date.now() - session.sentAt;
+        const TWENTY_MIN = 20 * 60 * 1000;
+        const ONE_HOUR   = 60 * 60 * 1000;
+
+        if (elapsed > ONE_HOUR) {
+          localStorage.removeItem('pendingSession');
+          return;
+        }
+
+        let shouldShow = false;
+        if (userLocation && session.location) {
+          shouldShow = calcDistance(userLocation, session.location) <= 50;
+        } else {
+          shouldShow = elapsed <= TWENTY_MIN;
+        }
+
+        if (shouldShow) {
+          document.getElementById('pendingBanner').classList.add('show');
+        }
+      }
+
+      function showPendingSession() {
+        document.getElementById('mainView').style.display    = 'none';
+        document.getElementById('successView').style.display = 'flex';
+        updateActionHint();
+        startPolling();
+      }
+
+      function calcDistance(a, b) {
+        const R = 6371000;
+        const dLat = (b.lat - a.lat) * Math.PI / 180;
+        const dLng = (b.lng - a.lng) * Math.PI / 180;
+        const x = Math.sin(dLat/2) * Math.sin(dLat/2)
+                + Math.cos(a.lat * Math.PI/180) * Math.cos(b.lat * Math.PI/180)
+                * Math.sin(dLng/2) * Math.sin(dLng/2);
+        return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+      }
+
+      function showToast(text, wrap) {
+        const t = document.getElementById('toast');
+        t.innerText = text;
+        if (wrap) {
+          t.classList.add('wrap');
+        } else {
+          t.classList.remove('wrap');
+        }
+        t.classList.add('show');
+        setTimeout(() => t.classList.remove('show'), 3000);
+      }
+
+      // 页面加载时检查 pending session，不弹窗
+      setTimeout(() => checkPendingSession(), 100);
+    </script>
+  </body>
+  </html>
+  `;
+  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=UTF-8" },
+  });
+}
+
+// ── 车主确认页面 ──────────────────────────────────────────────────
+
+function renderOwnerPage(plate, carConfig) {
+  const html = /*html*/ `
+  <!DOCTYPE html>
+  <html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#667eea">
+    <title>确认挪车</title>
+    <style>
+      :root { --sat: env(safe-area-inset-top, 0px); --sar: env(safe-area-inset-right, 0px); --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px); }
+      * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+      html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(160deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh; min-height: -webkit-fill-available;
+        padding: clamp(16px, 4vw, 24px);
+        padding-top: calc(clamp(16px, 4vw, 24px) + var(--sat));
+        padding-bottom: calc(clamp(16px, 4vw, 24px) + var(--sab));
+        padding-left: calc(clamp(16px, 4vw, 24px) + var(--sal));
+        padding-right: calc(clamp(16px, 4vw, 24px) + var(--sar));
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+      }
+      .card { background: rgba(255,255,255,0.95); padding: clamp(24px, 6vw, 36px); border-radius: clamp(24px, 6vw, 32px); text-align: center; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(102, 126, 234, 0.3); }
+      .emoji { font-size: clamp(52px, 13vw, 72px); margin-bottom: clamp(16px, 4vw, 24px); display: block; }
+      h1 { font-size: clamp(22px, 5.5vw, 28px); color: #2d3748; margin-bottom: 8px; }
+      .subtitle { color: #718096; font-size: clamp(14px, 3.5vw, 16px); margin-bottom: clamp(20px, 5vw, 28px); }
+      .map-section { background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%); border-radius: clamp(14px, 3.5vw, 18px); padding: clamp(14px, 3.5vw, 20px); margin-bottom: clamp(16px, 4vw, 24px); display: none; }
+      .map-section.show { display: block; }
+      .map-section p { font-size: clamp(12px, 3.2vw, 14px); color: #6366f1; margin-bottom: 12px; font-weight: 600; }
+      .map-links { display: flex; gap: clamp(8px, 2vw, 12px); flex-wrap: wrap; }
+      .map-btn { flex: 1; min-width: 110px; padding: clamp(12px, 3vw, 16px); border-radius: clamp(10px, 2.5vw, 14px); text-decoration: none; font-weight: 600; font-size: clamp(13px, 3.5vw, 15px); text-align: center; transition: transform 0.2s; min-height: 48px; display: flex; align-items: center; justify-content: center; }
+      .map-btn:active { transform: scale(0.96); }
+      .map-btn.amap { background: #1890ff; color: white; }
+      .map-btn.apple { background: #1d1d1f; color: white; }
+      .btn { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; width: 100%; padding: clamp(16px, 4vw, 20px); border-radius: clamp(14px, 3.5vw, 18px); font-size: clamp(16px, 4.2vw, 19px); font-weight: 700; cursor: pointer; box-shadow: 0 8px 24px rgba(16, 185, 129, 0.35); display: flex; align-items: center; justify-content: center; gap: 10px; transition: all 0.2s; min-height: 56px; }
+      .btn:active { transform: scale(0.98); }
+      .btn:disabled { background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%); box-shadow: none; cursor: not-allowed; }
+      .done-msg { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-radius: clamp(14px, 3.5vw, 18px); padding: clamp(16px, 4vw, 24px); margin-top: clamp(16px, 4vw, 24px); display: none; }
+      .done-msg.show { display: block; }
+      .done-msg p { color: #065f46; font-weight: 600; font-size: clamp(15px, 4vw, 17px); }
+      @media (min-width: 768px) { .card { max-width: 440px; padding: 40px; } }
+      @media (orientation: landscape) and (max-height: 500px) { body { justify-content: flex-start; padding-top: calc(12px + var(--sat)); } .card { padding: 20px 28px; } .emoji { font-size: 44px; margin-bottom: 12px; } .subtitle { margin-bottom: 16px; } }
+      @media (max-width: 350px) { .card { padding: 20px; border-radius: 20px; } .map-btn { min-width: 100px; padding: 10px; } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <span class="emoji">👋</span>
+      <h1>收到挪车请求</h1>
+      <p class="subtitle">对方正在等待，请尽快确认</p>
+
+      <div id="mapArea" class="map-section">
+        <p>📍 对方位置</p>
+        <div class="map-links">
+          <a id="amapLink"  href="#" class="map-btn amap">🗺️ 高德地图</a>
+          <a id="appleLink" href="#" class="map-btn apple">🍎 Apple Maps</a>
+        </div>
+      </div>
+
+      <button id="confirmBtn" class="btn" onclick="confirmMove()">
+        <span>🚀</span>
+        <span>我已知晓，正在前往</span>
+      </button>
+
+      <div id="doneMsg" class="done-msg">
+        <p>✅ 已通知对方您正在赶来！</p>
+      </div>
+    </div>
+
+    <script>
+      const PLATE = ${plate ? JSON.stringify(plate) : "''"};
+      let ownerLocation = null;
+
+      window.onload = async () => {
+        try {
+          const res = await fetch('/api/get-location' + (PLATE ? '?plate=' + PLATE : ''));
+          if (res.ok) {
+            const data = await res.json();
+            if (data.amapUrl) {
+              document.getElementById('mapArea').classList.add('show');
+              document.getElementById('amapLink').href  = data.amapUrl;
+              document.getElementById('appleLink').href = data.appleUrl;
+            }
+          }
+        } catch(e) {}
+      };
+
+      async function confirmMove() {
+        const btn = document.getElementById('confirmBtn');
+        btn.disabled  = true;
+        btn.innerHTML = '<span>📍</span><span>获取位置中...</span>';
+
+        if ('geolocation' in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            async pos => {
+              ownerLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+              await doConfirm();
+            },
+            async () => {
+              ownerLocation = null;
+              await doConfirm();
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+          );
+        } else {
+          ownerLocation = null;
+          await doConfirm();
+        }
+      }
+
+      async function doConfirm() {
+        const btn = document.getElementById('confirmBtn');
+        btn.innerHTML = '<span>⏳</span><span>确认中...</span>';
+
+        try {
+          await fetch('/api/owner-confirm' + (PLATE ? '?plate=' + PLATE : ''), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ location: ownerLocation })
+          });
+          btn.innerHTML    = '<span>✅</span><span>已确认</span>';
+          btn.style.background = 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)';
+          document.getElementById('doneMsg').classList.add('show');
+        } catch(e) {
+          btn.disabled  = false;
+          btn.innerHTML = '<span>🚀</span><span>我已知晓，正在前往</span>';
+        }
+      }
+    </script>
+  </body>
+  </html>
+  `;
+  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=UTF-8" },
+  });
+}

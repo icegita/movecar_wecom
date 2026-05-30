@@ -1,0 +1,1080 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
+  />
+  <title>发送端 · 界面预览</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=Sora:wght@400;600;700&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      --purple-start: #667eea;
+      --purple-end: #764ba2;
+      --card-bg: rgba(255, 255, 255, 0.96);
+      --text-dark: #1a202c;
+      --text-mid: #4a5568;
+      --text-muted: #a0aec0;
+      --green: #10b981;
+      --red: #ef4444;
+      --sat: env(safe-area-inset-top, 0px);
+      --sab: env(safe-area-inset-bottom, 0px);
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html {
+      font-size: 16px;
+    }
+
+    body {
+      font-family:
+        "Noto Sans SC",
+        "Sora",
+        -apple-system,
+        sans-serif;
+      background: linear-gradient(
+        160deg,
+        var(--purple-start) 0%,
+        var(--purple-end) 100%
+      );
+      min-height: 100vh;
+      padding: 20px 16px calc(20px + var(--sab));
+      padding-top: calc(56px + var(--sat));
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      position: relative;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        radial-gradient(
+          circle at 15% 25%,
+          rgba(255, 255, 255, 0.14) 0%,
+          transparent 45%
+        ),
+        radial-gradient(
+          circle at 85% 75%,
+          rgba(255, 255, 255, 0.08) 0%,
+          transparent 45%
+        );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .preview-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 16px;
+      z-index: 999;
+      font-family: "Sora", sans-serif;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+    .preview-bar span {
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 11px;
+      margin-right: 4px;
+    }
+    .pb-btn {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: rgba(255, 255, 255, 0.7);
+      padding: 5px 12px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    .pb-btn.active,
+    .pb-btn:hover {
+      background: rgba(255, 255, 255, 0.25);
+      color: white;
+      border-color: rgba(255, 255, 255, 0.5);
+    }
+
+    .container {
+      width: 100%;
+      max-width: 420px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 28px;
+      padding: 28px 24px;
+      box-shadow: 0 10px 40px rgba(0, 147, 233, 0.2);
+      margin-bottom: 16px;
+    }
+
+    .header {
+      text-align: center;
+      padding: 32px 28px;
+      background: white;
+    }
+    .icon-wrap {
+      width: 100px;
+      height: 100px;
+      background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%);
+      border-radius: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+      box-shadow: 0 12px 32px rgba(0, 147, 233, 0.35);
+    }
+    .icon-wrap span {
+      font-size: 52px;
+      line-height: 1;
+    }
+    .header h1 {
+      font-size: 30px;
+      font-weight: 700;
+      color: #1a202c;
+      margin-bottom: 6px;
+    }
+    .header p {
+      font-size: 16px;
+      color: #718096;
+      font-weight: 500;
+    }
+
+    .input-card {
+      padding: 0;
+      overflow: hidden;
+    }
+    .msg-input {
+      width: 100%;
+      min-height: 120px;
+      border: none;
+      padding: 24px;
+      font-size: 18px;
+      font-family: inherit;
+      outline: none;
+      color: #2d3748;
+      background: transparent;
+      line-height: 1.5;
+      cursor: text;
+    }
+    .msg-input:empty::before {
+      content: "输入留言给车主...（或点击下方按钮）";
+      color: #a0aec0;
+    }
+
+    .tags {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      padding: 0 20px 20px 20px;
+      flex-wrap: wrap;
+    }
+    .tag {
+      background: linear-gradient(135deg, #e0f7fa 0%, #b2ebf2 100%);
+      color: #00796b;
+      padding: 12px 18px;
+      border-radius: 20px;
+      font-size: 15px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: 1px solid #80cbc4;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+    .tag:active {
+      transform: scale(0.95);
+    }
+    .tag.active {
+      background: linear-gradient(135deg, #b2dfdb 0%, #80cbc4 100%);
+      border-color: #00897b;
+      color: #00695c;
+    }
+
+    .loc-card {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 22px 24px;
+      cursor: pointer;
+      min-height: 64px;
+    }
+    .loc-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      transition: all 0.3s;
+      flex-shrink: 0;
+    }
+    .loc-icon.idle { background: #f0f9ff; }
+    .loc-icon.loading { background: #fff3cd; }
+    .loc-icon.success { background: #d4edda; }
+    .loc-icon.error { background: #f8d7da; }
+    .loc-content {
+      flex: 1;
+      min-width: 0;
+    }
+    .loc-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #2d3748;
+    }
+    .loc-status {
+      font-size: 14px;
+      color: #718096;
+      margin-top: 3px;
+    }
+    .loc-status.success { color: #28a745; }
+    .loc-status.error { color: #dc3545; }
+    .loc-status.hint { color: #0093E9; font-weight: 600; }
+
+    .btn-main {
+      background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%);
+      color: white;
+      border: none;
+      padding: 22px;
+      border-radius: 22px;
+      font-size: 20px;
+      font-weight: 700;
+      cursor: pointer;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 10px 30px rgba(0, 147, 233, 0.35);
+      transition: all 0.2s;
+      min-height: 56px;
+    }
+    .btn-main:active {
+      transform: scale(0.98);
+    }
+    .btn-main:disabled {
+      background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%);
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    .pending-banner {
+      background: rgba(255,255,255,0.95);
+      border-radius: 20px;
+      padding: 18px 22px;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 8px 24px rgba(0,147,233,0.18);
+      border: 1.5px solid rgba(0,147,233,0.25);
+      cursor: pointer;
+      margin-bottom: 16px;
+    }
+    .pending-banner.show {
+      display: flex;
+    }
+    .pending-banner-icon {
+      font-size: 28px;
+      flex-shrink: 0;
+    }
+    .pending-banner-text {
+      flex: 1;
+      font-size: 16px;
+      font-weight: 600;
+      color: #2d3748;
+    }
+    .pending-banner-arrow {
+      font-size: 16px;
+      color: #0093E9;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .success-card {
+      text-align: center;
+      background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+      border: 2px solid #28a745;
+    }
+    .success-icon {
+      font-size: 80px;
+      margin-bottom: 20px;
+      display: block;
+    }
+    .success-card h2 {
+      color: #155724;
+      margin-bottom: 8px;
+      font-size: 28px;
+    }
+    .success-card p {
+      color: #1e7e34;
+      font-size: 16px;
+    }
+    .loading-text {
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .owner-card {
+      background: white;
+      border: 2px solid #80D0C7;
+      text-align: center;
+    }
+    .owner-card.hidden {
+      display: none;
+    }
+    .owner-card h3 {
+      color: #0093E9;
+      margin-bottom: 8px;
+      font-size: 22px;
+    }
+    .owner-card p {
+      color: #718096;
+      margin-bottom: 16px;
+      font-size: 16px;
+    }
+    .map-links {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .map-btn {
+      flex: 1;
+      min-width: 120px;
+      padding: 16px;
+      border-radius: 16px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 15px;
+      text-align: center;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .map-btn.amap {
+      background: #1890ff;
+      color: white;
+    }
+    .map-btn.apple {
+      background: #1d1d1f;
+      color: white;
+    }
+
+    .action-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .action-hint {
+      text-align: center;
+      font-size: 15px;
+      color: #718096;
+      margin-bottom: 4px;
+    }
+    .btn-retry {
+      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+      color: white;
+      border: none;
+      padding: 18px;
+      border-radius: 18px;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+      min-height: 52px;
+    }
+    .btn-retry:active {
+      transform: scale(0.98);
+    }
+    .btn-retry:disabled {
+      background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%);
+      cursor: not-allowed;
+    }
+    .btn-share-loc {
+      background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%);
+      color: white;
+      border: none;
+      padding: 18px;
+      border-radius: 18px;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+      min-height: 52px;
+    }
+    .btn-share-loc.show {
+      display: flex;
+    }
+    .btn-share-loc:active {
+      transform: scale(0.98);
+    }
+    .btn-phone {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: white;
+      text-decoration: none;
+      text-align: center;
+      padding: 18px;
+      border-radius: 18px;
+      font-size: 17px;
+      font-weight: 700;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-phone.show {
+      display: flex;
+    }
+
+    .toast {
+      position: fixed;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-80px);
+      background: white;
+      padding: 12px 24px;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-dark);
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+      opacity: 0;
+      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 600;
+      white-space: nowrap;
+      max-width: calc(100vw - 32px);
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .toast.wrap {
+      white-space: normal;
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      visibility: hidden;
+      opacity: 0;
+      transition: all 0.2s;
+    }
+    .modal-overlay.show {
+      visibility: visible;
+      opacity: 1;
+    }
+    .modal-box {
+      background: white;
+      border-radius: 28px;
+      padding: 32px 24px;
+      max-width: 340px;
+      width: 85%;
+      text-align: center;
+    }
+    .modal-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .modal-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #1a202c;
+      margin-bottom: 8px;
+    }
+    .modal-desc {
+      font-size: 14px;
+      color: #718096;
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+    .modal-buttons {
+      display: flex;
+      gap: 12px;
+    }
+    .modal-btn {
+      flex: 1;
+      padding: 14px 16px;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      font-family: inherit;
+    }
+    .modal-btn-primary {
+      background: linear-gradient(135deg, #0093E9 0%, #80D0C7 100%);
+      color: white;
+    }
+    .modal-btn-secondary {
+      background: #f1f5f9;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <div class="preview-bar">
+    <span>预览状态：</span>
+    <button class="pb-btn active" id="btn-normal" onclick="switchState('normal')">📱 发送端</button>
+    <button class="pb-btn" id="btn-success" onclick="switchState('success')">✅ 发送成功</button>
+    <button class="pb-btn" id="btn-confirmed" onclick="switchState('confirmed')">🎉 车主确认</button>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <div class="container">
+    <div id="mainView">
+      <div class="card header">
+        <div class="icon-wrap"><span>🚗</span></div>
+        <h1>通知车主挪车</h1>
+        <p>Notify Car Owner</p>
+      </div>
+
+      <div id="pendingBanner" class="pending-banner" onclick="showPendingSession()">
+        <span class="pending-banner-icon">🔔</span>
+        <span class="pending-banner-text">您有一条进行中的通知</span>
+        <span class="pending-banner-arrow">查看 →</span>
+      </div>
+
+      <div class="card input-card">
+        <div id="msgInput" class="msg-input" contenteditable="true" data-placeholder="输入留言给车主...（或点击下方按钮）"></div>
+        <div class="tags">
+          <div id="tag-block" class="tag" onclick="selectBase('您的车挡住我了，请尽快挪开！')">🚧 挪车通知</div>
+          <div id="tag-temp" class="tag" onclick="selectBase('此地不准停车，请尽快挪开！')">⏱️ 违停提醒</div>
+        </div>
+      </div>
+
+      <div class="card loc-card" onclick="showLocationModal()">
+        <div id="locIcon" class="loc-icon idle">📍</div>
+        <div class="loc-content">
+          <div class="loc-title">我的位置</div>
+          <div id="locStatus" class="loc-status">点击获取位置</div>
+        </div>
+      </div>
+
+      <button id="notifyBtn" class="btn-main" onclick="sendNotify()" disabled>
+        <span>🔔</span>
+        <span>一键通知车主</span>
+      </button>
+    </div>
+
+    <div id="successView" style="display: none;">
+      <div class="card success-card">
+        <span class="success-icon">✅</span>
+        <h2>通知已发送！</h2>
+        <p id="waitingText" class="loading-text">正在等待车主回应...</p>
+      </div>
+
+      <div id="ownerFeedback" class="card owner-card hidden">
+        <span style="font-size:56px; display:block; margin-bottom:16px">🎉</span>
+        <h3>车主已收到通知</h3>
+        <p>正在赶来，点击查看车主位置</p>
+        <div id="ownerMapLinks" class="map-links" style="display:none">
+          <a id="ownerAmapLink" href="#" class="map-btn amap">🗺️ 高德地图</a>
+          <a id="ownerAppleLink" href="#" class="map-btn apple">🍎 Apple Maps</a>
+        </div>
+      </div>
+
+      <div class="card action-card">
+        <p id="actionHint" class="action-hint">车主没反应？试试其他方式</p>
+        <button id="shareLocBtn" class="btn-share-loc" onclick="shareLocationInSuccess()">
+          <span>📍</span>
+          <span>分享位置</span>
+        </button>
+        <button id="retryBtn" class="btn-retry" onclick="retryNotify()">
+          <span>🔔</span>
+          <span>再次通知</span>
+        </button>
+        <a id="phoneBtn" href="tel:" class="btn-phone">
+          <span>📞</span>
+          <span>直接拨号</span>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div id="locationTipModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-icon">📍</div>
+      <div class="modal-title">位置信息说明</div>
+      <div class="modal-desc">分享位置可让车主确认您在车旁<br>不分享将等待30秒后发送通知</div>
+      <div class="modal-buttons">
+        <button class="modal-btn modal-btn-secondary" onclick="closeModalAndDeny()">不分享</button>
+        <button class="modal-btn modal-btn-primary" onclick="closeModalAndRequest()">分享</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let userLocation = null;
+    let checkTimer = null;
+    let selectedBaseText = '';
+    let countdownTimer = null;
+    let locationShared = false;
+    let locationFailed = false;
+    let countdownActive = false;
+    let countdownReason = '';
+    let lastModalCloseTime = 0;
+    const MODAL_COOLDOWN = 3000;
+    let retryCooldownTimer = null;
+
+    const mainView = document.getElementById('mainView');
+    const successView = document.getElementById('successView');
+    const notifyBtn = document.getElementById('notifyBtn');
+    const locIcon = document.getElementById('locIcon');
+    const locStatus = document.getElementById('locStatus');
+    const msgInput = document.getElementById('msgInput');
+    const pendingBanner = document.getElementById('pendingBanner');
+    const phoneBtn = document.getElementById('phoneBtn');
+
+    function updatePhoneButtonVisibility() {
+      if (locationShared && userLocation !== null) {
+        phoneBtn.classList.add('show');
+      } else {
+        phoneBtn.classList.remove('show');
+      }
+    }
+
+    function updateActionHint() {
+      const hint = document.getElementById('actionHint');
+      const shareLocBtn = document.getElementById('shareLocBtn');
+      if (locationShared && userLocation !== null) {
+        hint.innerText = '车主没反应？试试其他方式';
+        shareLocBtn.classList.remove('show');
+      } else {
+        hint.innerText = '车主没反应？分享定位可拨打电话';
+        shareLocBtn.classList.add('show');
+      }
+    }
+
+    function showModal() {
+      document.getElementById('locationTipModal').classList.add('show');
+    }
+
+    function hideModal() {
+      document.getElementById('locationTipModal').classList.remove('show');
+    }
+
+    function showToast(text, wrap) {
+      const t = document.getElementById('toast');
+      t.innerText = text;
+      if (wrap) {
+        t.classList.add('wrap');
+      } else {
+        t.classList.remove('wrap');
+      }
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+
+    function showLocationModal() {
+      if (locationShared && userLocation !== null) {
+        showToast('📍 已获取位置');
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastModalCloseTime < MODAL_COOLDOWN) {
+        return;
+      }
+
+      if (countdownActive && countdownReason === 'denied') {
+        showToast('⏳ 已选择不分享位置，倒计时结束后方可发送', true);
+        return;
+      }
+
+      showModal();
+    }
+
+    function closeModalAndRequest() {
+      hideModal();
+      requestLocation();
+    }
+
+    function closeModalAndDeny() {
+      hideModal();
+      denyLocation();
+    }
+
+    function requestLocation() {
+      lastModalCloseTime = Date.now();
+      locationFailed = false;
+
+      locIcon.className = 'loc-icon loading';
+      locStatus.className = countdownActive ? 'loc-status error' : 'loc-status';
+      locStatus.innerText = '正在获取定位...';
+
+      // 模拟定位成功
+      setTimeout(() => {
+        userLocation = { lat: 29.5721, lng: 106.5711 };
+        locationShared = true;
+        locationFailed = false;
+        locIcon.className = 'loc-icon success';
+        locStatus.className = 'loc-status success';
+        locStatus.innerText = '已获取位置 ✓';
+        notifyBtn.disabled = false;
+        stopCountdown();
+        checkPendingSession();
+        updatePhoneButtonVisibility();
+        showToast('📍 位置获取成功');
+      }, 800);
+    }
+
+    function denyLocation() {
+      lastModalCloseTime = Date.now();
+      locationFailed = false;
+      locationShared = false;
+      locIcon.className = 'loc-icon error';
+      locStatus.className = 'loc-status error';
+      startLocationCountdown('denied');
+      updatePhoneButtonVisibility();
+      checkPendingSession();
+    }
+
+    function startLocationCountdown(reason) {
+      if (countdownActive) return;
+
+      countdownActive = true;
+      countdownReason = reason;
+
+      let remaining = 30;
+      window._countdownRemaining = remaining;
+      notifyBtn.disabled = true;
+
+      const prefix = reason === 'failed' ? '定位失败，' : '已选择不分享位置，';
+      const endText = reason === 'failed' ? '定位失败，点击重新获取' : '未分享位置，点击重新获取';
+
+      locStatus.innerText = prefix + remaining + '秒后可发送';
+      locStatus.className = 'loc-status error';
+
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdownTimer = setInterval(() => {
+        remaining--;
+        window._countdownRemaining = remaining;
+        locStatus.innerText = prefix + remaining + '秒后可发送';
+        if (remaining <= 0) {
+          stopCountdown();
+          locStatus.innerText = endText;
+          locStatus.className = 'loc-status hint';
+          notifyBtn.disabled = false;
+          showToast('✅ 现在可以发送通知了');
+        }
+      }, 1000);
+    }
+
+    function stopCountdown() {
+      if (countdownTimer) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+      }
+      countdownActive = false;
+      countdownReason = '';
+      window._countdownRemaining = 0;
+    }
+
+    function selectBase(text) {
+      const el = msgInput;
+      if (selectedBaseText === text) {
+        removeBaseText(el, text);
+        selectedBaseText = '';
+      } else {
+        if (selectedBaseText) {
+          replaceBaseText(el, selectedBaseText, text);
+        } else {
+          insertAtCursorNoFocus(el, text);
+        }
+        selectedBaseText = text;
+      }
+      updateTagActive();
+    }
+
+    function insertAtCursorNoFocus(el, text) {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        const node = document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } else {
+        el.appendChild(document.createTextNode(text));
+      }
+    }
+
+    function removeBaseText(el, text) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const n = walker.currentNode;
+        if (n.textContent.includes(text)) {
+          n.textContent = n.textContent.replace(text, '');
+          break;
+        }
+      }
+    }
+
+    function replaceBaseText(el, oldText, newText) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const n = walker.currentNode;
+        if (n.textContent.includes(oldText)) {
+          n.textContent = n.textContent.replace(oldText, newText);
+          return;
+        }
+      }
+      insertAtCursorNoFocus(el, newText);
+    }
+
+    function updateTagActive() {
+      const tagBlock = document.getElementById('tag-block');
+      const tagTemp = document.getElementById('tag-temp');
+      if (selectedBaseText === '您的车挡住我了，请尽快挪开！') {
+        tagBlock.classList.add('active');
+        tagTemp.classList.remove('active');
+      } else if (selectedBaseText === '此地不准停车，请尽快挪开！') {
+        tagTemp.classList.add('active');
+        tagBlock.classList.remove('active');
+      } else {
+        tagBlock.classList.remove('active');
+        tagTemp.classList.remove('active');
+      }
+    }
+
+    function shareLocationInSuccess() {
+      const btn = document.getElementById('shareLocBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span>📍</span><span>获取中...</span>';
+
+      // 模拟定位成功
+      setTimeout(() => {
+        userLocation = { lat: 29.5721, lng: 106.5711 };
+        locationShared = true;
+        btn.innerHTML = '<span>✅</span><span>已获取</span>';
+        btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+        updatePhoneButtonVisibility();
+        updateActionHint();
+        showToast('📍 位置已分享，现在可以拨打电话了');
+      }, 800);
+    }
+
+    async function sendNotify() {
+      const msg = msgInput.innerText.trim() || "请挪车，谢谢配合";
+      notifyBtn.disabled = true;
+      notifyBtn.innerHTML = '<span>🚀</span><span>发送中...</span>';
+
+      setTimeout(() => {
+        localStorage.setItem('pendingSession', JSON.stringify({
+          sentAt: Date.now(),
+          location: userLocation
+        }));
+        showToast('✅ 发送成功！');
+
+        mainView.style.display = 'none';
+        successView.style.display = 'block';
+        updateActionHint();
+        startPolling();
+
+        notifyBtn.innerHTML = '<span>🔔</span><span>一键通知车主</span>';
+        notifyBtn.disabled = false;
+      }, 1000);
+    }
+
+    function startPolling() {
+      let count = 0;
+      if (checkTimer) clearInterval(checkTimer);
+      checkTimer = setInterval(() => {
+        count++;
+        if (count > 30) { clearInterval(checkTimer); return; }
+        if (count === 8) {
+          const waitingText = document.getElementById('waitingText');
+          if (waitingText) waitingText.style.display = 'none';
+          const fb = document.getElementById('ownerFeedback');
+          fb.classList.remove('hidden');
+          const mapLinks = document.getElementById('ownerMapLinks');
+          mapLinks.style.display = 'flex';
+          document.getElementById('ownerAmapLink').href = 'https://uri.amap.com/marker?position=106.5711,29.5721&name=车主位置';
+          document.getElementById('ownerAppleLink').href = 'https://maps.apple.com/?ll=29.5721,106.5711&q=车主位置';
+          clearInterval(checkTimer);
+        }
+      }, 1000);
+    }
+
+    async function retryNotify() {
+      const btn = document.getElementById('retryBtn');
+      if (btn.disabled) return;
+
+      btn.disabled = true;
+      btn.innerHTML = '<span>🚀</span><span>发送中...</span>';
+
+      setTimeout(() => {
+        showToast('✅ 再次通知已发送！');
+        const waitingText = document.getElementById('waitingText');
+        if (waitingText) waitingText.innerText = '已再次通知，等待车主回应...';
+        btn.innerHTML = '<span>✅</span><span>已发送</span>';
+        btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+
+        // 模拟5分钟冷却
+        if (retryCooldownTimer) clearTimeout(retryCooldownTimer);
+        retryCooldownTimer = setTimeout(() => {
+          btn.disabled = false;
+          btn.innerHTML = '<span>🔔</span><span>再次通知</span>';
+          btn.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
+        }, 300000);
+      }, 800);
+    }
+
+    function checkPendingSession() {
+      let session;
+      try { session = JSON.parse(localStorage.getItem('pendingSession')); } catch(e) {}
+      if (!session) return;
+
+      const elapsed = Date.now() - session.sentAt;
+      const TWENTY_MIN = 20 * 60 * 1000;
+      const ONE_HOUR = 60 * 60 * 1000;
+
+      if (elapsed > ONE_HOUR) {
+        localStorage.removeItem('pendingSession');
+        return;
+      }
+
+      let shouldShow = false;
+      if (userLocation && session.location) {
+        const distance = calcDistance(userLocation, session.location);
+        shouldShow = distance <= 50;
+      } else {
+        shouldShow = elapsed <= TWENTY_MIN;
+      }
+
+      if (shouldShow) {
+        pendingBanner.classList.add('show');
+      }
+    }
+
+    function calcDistance(a, b) {
+      const R = 6371000;
+      const dLat = (b.lat - a.lat) * Math.PI / 180;
+      const dLng = (b.lng - a.lng) * Math.PI / 180;
+      const x = Math.sin(dLat/2) * Math.sin(dLat/2)
+              + Math.cos(a.lat * Math.PI/180) * Math.cos(b.lat * Math.PI/180)
+              * Math.sin(dLng/2) * Math.sin(dLng/2);
+      return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+    }
+
+    function showPendingSession() {
+      mainView.style.display = 'none';
+      successView.style.display = 'block';
+      updateActionHint();
+      startPolling();
+    }
+
+    function switchState(state) {
+      document.querySelectorAll('.pb-btn').forEach(btn => btn.classList.remove('active'));
+
+      if (state === 'normal') {
+        document.getElementById('btn-normal').classList.add('active');
+        mainView.style.display = 'block';
+        successView.style.display = 'none';
+        // 重置所有状态
+        locationShared = false;
+        locationFailed = false;
+        userLocation = null;
+        stopCountdown();
+        locIcon.className = 'loc-icon idle';
+        locStatus.className = 'loc-status';
+        locStatus.innerText = '点击获取位置';
+        msgInput.innerText = '';
+        notifyBtn.disabled = true;
+        notifyBtn.innerHTML = '<span>🔔</span><span>一键通知车主</span>';
+        pendingBanner.classList.remove('show');
+        selectedBaseText = '';
+        updateTagActive();
+        updatePhoneButtonVisibility();
+        updateActionHint();
+        // 重置分享位置按钮
+        const shareLocBtn = document.getElementById('shareLocBtn');
+        shareLocBtn.classList.remove('show');
+        shareLocBtn.disabled = false;
+        shareLocBtn.innerHTML = '<span>📍</span><span>分享位置</span>';
+        shareLocBtn.style.background = 'linear-gradient(135deg, #0093E9 0%, #80D0C7 100%)';
+        // 重置再次通知按钮
+        const retryBtn = document.getElementById('retryBtn');
+        retryBtn.disabled = false;
+        retryBtn.innerHTML = '<span>🔔</span><span>再次通知</span>';
+        retryBtn.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
+        if (retryCooldownTimer) { clearTimeout(retryCooldownTimer); retryCooldownTimer = null; }
+        lastModalCloseTime = 0;
+      } else if (state === 'success') {
+        document.getElementById('btn-success').classList.add('active');
+        mainView.style.display = 'none';
+        successView.style.display = 'block';
+        const waitingText = document.getElementById('waitingText');
+        if (waitingText) {
+          waitingText.style.display = 'block';
+          waitingText.innerText = '正在等待车主回应...';
+        }
+        document.getElementById('ownerFeedback').classList.add('hidden');
+        updateActionHint();
+      } else if (state === 'confirmed') {
+        document.getElementById('btn-confirmed').classList.add('active');
+        mainView.style.display = 'none';
+        successView.style.display = 'block';
+        const waitingText = document.getElementById('waitingText');
+        if (waitingText) waitingText.style.display = 'none';
+        const fb = document.getElementById('ownerFeedback');
+        fb.classList.remove('hidden');
+        const mapLinks = document.getElementById('ownerMapLinks');
+        mapLinks.style.display = 'flex';
+        document.getElementById('ownerAmapLink').href = 'https://uri.amap.com/marker?position=106.5711,29.5721&name=车主位置';
+        document.getElementById('ownerAppleLink').href = 'https://maps.apple.com/?ll=29.5721,106.5711&q=车主位置';
+        updateActionHint();
+      }
+    }
+
+    setTimeout(() => checkPendingSession(), 100);
+  </script>
+</body>
+</html>
